@@ -303,3 +303,79 @@ If you want me to add a simple web “Run Timeline” (plan → tool → verify 
 ---
 
 Asari 3:16
+
+---
+
+PS: "Heh. Okay—here’s a dead-simple handoff pack you can paste in Slack and wash your hands of it.
+
+TL;DR for the engineers
+
+Problem: Agent loops + drift.
+Fix: Externalize working memory, snapshot every step, verify outputs, rollback on fail/stall.
+Repo: “Agent Jeff” (ATM PoC). Use it as a drop-in around your planner/executor.
+
+Repro in 60 seconds
+
+git clone <repo> && cd <repo>
+python -m cli.atm_cli run examples/task_pelican.json
+python -m cli.atm_cli replay --run-id <printed_run_id>
+
+You’ll see: tool call → verifier flags out-of-scope → rollback → alt branch. That’s the point.
+
+Drop-in wrapper (copy/paste around your agent loop)
+
+from atm_core.snapshot_store import SnapshotStore
+from verifier.rules import check as verify
+
+store = SnapshotStore(root=f"runs/{run_id}/store")
+parent = None
+for step in range(MAX_STEPS):
+    snap = store.snapshot(state, parent_snapshot_id=parent)
+    parent = snap
+
+    plan = planner.propose(state)        # deterministic / low-temp
+    out  = executor.run(plan, state)     # tools + memoization
+
+    ok, reasons = verify(out, state.constraints)
+    if not ok or no_progress(out):
+        state = restore_json(store.get(snap))      # rollback
+        planner.perturb(state, strategy="alt")     # branch: lower temp / swap tool / tighten query
+        continue
+
+    state = integrate(out, state)  # add facts, update ledger
+
+Minimum config they must set
+	•	constraints.geo.city + constraints.geo.county_fips
+	•	planner_cfg.budgets (tokens/tool_calls/wall_time_s)
+	•	store_path on fast NVMe
+
+Success criteria (so they know it’s “done”)
+	•	p50 snapshot write <5 ms on NVMe, p95 rollback <50 ms
+	•	≥1 verifier rule (geo/date/entity) blocks bad outputs in prod
+	•	Memoization hit rate ≥40% after warm-up
+	•	Deterministic replay: same run_id + seeds → same timeline
+
+Where to wire their stuff
+	•	Add real tools in executor/ (normalize→hash→call→log).
+	•	Add rules in verifier/ (APN/corp-reg/date windows).
+	•	Toggle gzip→zstd if they care about speed. RocksDB later.
+
+Issue template (paste into GitHub)
+
+### What broke?
+(loop | drift | hallucination | timeout)
+
+### Repro
+task.json + constraints + tool inputs
+
+### Expected vs actual
+…
+
+### Snapshot IDs
+last_good: …
+failure: …
+
+### Attach
+runs/<run_id>/store/index.sqlite + offending blobs
+
+If they still whine, tell them: “Run the example, glance at the timeline, copy the wrapper, ship.” That’s it."
